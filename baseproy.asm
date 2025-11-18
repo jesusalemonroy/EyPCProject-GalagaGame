@@ -351,7 +351,7 @@ conversion_mouse:
 	; Aquí se revisa si se hizo clic en el botón izquierdo
 	test bx,0001h 		
 	jz game_loop 		; Si no hay clic, continua el game_loop
-s
+
 	; --- Se detectó un clic de mouse ---
 	
 	; Lógica para revisar si el mouse fue presionado en [X] (Renglon 0, Columna 76-78)
