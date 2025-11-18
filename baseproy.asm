@@ -351,7 +351,7 @@ conversion_mouse:
 	; Aquí se revisa si se hizo clic en el botón izquierdo
 	test bx,0001h 		
 	jz game_loop 		; Si no hay clic, continua el game_loop
-
+s
 	; --- Se detectó un clic de mouse ---
 	
 	; Lógica para revisar si el mouse fue presionado en [X] (Renglon 0, Columna 76-78)
@@ -389,55 +389,54 @@ salir:				;inicia etiqueta salir
 ; NUEVO PROCEDIMIENTO: MANEJA_TECLADO
 ; Mueve la nave del jugador si se presiona 'A' o 'D'
 ;----------------------------------------------------
-MANEJA_TECLADO proc
-	push ax
-	push bx
-	push cx
+	MANEJA_TECLADO proc
+		push ax
+		push bx
+		push cx
 	
-	; Convertir a mayúscula para simplificar la comprobación
-	cmp al,'a'
-	jl check_d_key 		; Si ya es mayúscula o no es alfabético, saltar
-	cmp al,'z'
-	jg check_d_key
-	sub al, 20h 	; Convierte a mayúscula ('a' -> 'A', 'd' -> 'D')
+		; Convertir a mayúscula para simplificar la comprobación
+		cmp al,'a'
+		jl check_d_key 		; Si ya es mayúscula o no es alfabético, saltar
+		cmp al,'z'
+		jg check_d_key
+		sub al, 20h 	; Convierte a mayúscula ('a' -> 'A', 'd' -> 'D')
 
-	; Comprobar 'A' (Izquierda)
-	cmp al,Tecla_A
-	jne check_d_key
+		; Comprobar 'A' (Izquierda)
+		cmp al,Tecla_A
+		jne check_d_key
 
-	; Lógica Mover Izquierda
-	mov bl,[player_col]
-	; El límite izquierdo de la nave es player_col - 2. Debe ser >= lim_izquierdo
-	cmp bl,lim_izquierdo + 2 
-	jle end_maneja_teclado ; No moverse si está en el límite
+		; Lógica Mover Izquierda
+		mov bl,[player_col]
+		; El límite izquierdo de la nave es player_col - 2. Debe ser >= lim_izquierdo
+		cmp bl,lim_izquierdo + 2 
+		jle end_maneja_teclado ; No moverse si está en el límite
 
-	call BORRA_JUGADOR	; Borrar la nave en la posición actual
-	dec [player_col]	; Decrementar la columna del jugador
-	call IMPRIME_JUGADOR	; Dibujar la nave en la nueva posición
-	jmp end_maneja_teclado
+		call BORRA_JUGADOR	; Borrar la nave en la posición actual
+		dec [player_col]	; Decrementar la columna del jugador
+		call IMPRIME_JUGADOR	; Dibujar la nave en la nueva posición
+		jmp end_maneja_teclado
 
-check_d_key:
-	; Comprobar 'D' (Derecha)
-	cmp al,Tecla_D
-	jne end_maneja_teclado
+	check_d_key:
+		; Comprobar 'D' (Derecha)
+		cmp al,Tecla_D
+		jne end_maneja_teclado
 
-	; Lógica Mover Derecha
-	mov bl,[player_col]
-	; El límite derecho de la nave es player_col + 2. Debe ser <= lim_derecho
-	cmp bl,lim_derecho - 2 
-	jge end_maneja_teclado ; No moverse si está en el límite
+		; Lógica Mover Derecha
+		mov bl,[player_col]
+		; El límite derecho de la nave es player_col + 2. Debe ser <= lim_derecho
+		cmp bl,lim_derecho - 2 
+		jge end_maneja_teclado ; No moverse si está en el límite
 
-	call BORRA_JUGADOR	; Borrar la nave en la posición actual
-	inc [player_col]	; Incrementar la columna del jugador
-	call IMPRIME_JUGADOR	; Dibujar la nave en la nueva posición
+		call BORRA_JUGADOR	; Borrar la nave en la posición actual
+		inc [player_col]	; Incrementar la columna del jugador
+		call IMPRIME_JUGADOR	; Dibujar la nave en la nueva posición
 
-end_maneja_teclado:
-	pop cx
-	pop bx
-	pop ax
-	ret
-MANEJA_TECLADO endp
-;----------------------------------------------------
+	end_maneja_teclado:
+		pop cx
+		pop bx
+		pop ax
+		ret
+	MANEJA_TECLADO endp
 
 	DIBUJA_UI proc
 		;imprimir esquina superior izquierda del marco
