@@ -102,6 +102,7 @@ play_inf equ play_ren+1
 
 Tecla_A equ 41h ;'A' para izquierda
 Tecla_D equ 44h ;'D' para derecha
+Tecla_S equ 53h ;'S' para detener nave (Stop) 
 Tecla_SPACE equ 20h ;' ' para disparar (ASCII de Spacebar)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -146,6 +147,13 @@ col_aux db 0 ;variable auxiliar para operaciones con posicion - columna
 ren_aux db 0 ;variable auxiliar para operaciones con posicion - renglon
 
 conta db 0 ;contador
+
+; *** VARIABLE DE ESTADO DE MOVIMIENTO ***
+move_dir db 0 ; 0=ninguno/Stop, 1=izquierda (A), 2=derecha (D). No se reinicia en el game_loop.
+
+; Variables de control de velocidad de la nave (mayor = más lento)
+player_speed_timer db 0 ; Contador para la velocidad de la nave
+player_speed_delay equ 3 ; La nave se moverá cada 3 ciclos del juego (VALOR AJUSTABLE)
 
 ;; Variables de ayuda para lectura de tiempo del sistema
 tick_ms dw 55 ;55 ms por cada tick del sistema, esta variable se usa para operación de MUL convertir ticks a segundos
@@ -339,16 +347,25 @@ muestra_cursor_mouse ;hace visible el cursor del mouse
 call IMPRIME_JUGADOR ; Dibuja la nave en la posición inicial
 
 game_loop:
-; 1. Manejo del teclado (movimiento de la nave y disparo)
-mov ah, 01h ; Revisa si hay una tecla disponible (no bloqueante)
-int 16h
-jz handle_mouse ; Si Z flag = 1 (no hay tecla), salta a revisar el mouse
+    ; move_dir NO se resetea aquí, lo que permite el movimiento persistente
+    ; hasta que se presiona 'S'.
 
-; Hay una tecla disponible, la lee (bloqueante, pero ya sabemos que hay datos)
-mov ah, 00h
-int 16h ; AL = código ASCII, AH = scan code
+; 1. Manejo del teclado (Lee todas las teclas y establece la bandera de dirección/disparo)
+keyboard_poll_loop:
+    mov ah, 01h ; Revisa si hay una tecla disponible (no bloqueante)
+    int 16h
+    jz end_keyboard_poll ; Si Z flag = 1 (buffer vacío), salta a terminar la revisión
 
-call MANEJA_TECLADO ; Llama al procedimiento para mover/disparar
+    ; Si Z flag = 0 (hay tecla), la lee (bloqueante, pero ya sabemos que hay datos)
+    mov ah, 00h
+    int 16h ; AL = código ASCII, AH = scan code
+
+    call MANEJA_TECLADO_V2 ; Establece la bandera move_dir (1, 2, o 0/Stop) o dispara
+    jmp keyboard_poll_loop ; Vuelve a revisar si hay más teclas en el buffer (procesa todas)
+
+end_keyboard_poll:
+    
+    call HANDLE_MOVEMENT ; Ejecuta el movimiento si la bandera move_dir está establecida Y el timer lo permite
 
 handle_mouse:
 ; 2. Manejo del mouse (solo para botones de UI como [X])
@@ -408,17 +425,132 @@ int 21h ;señal 21h de interrupción, pasa el control al sistema operativo
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;----------------------------------------------------
+; PROCEDIMIENTO: HANDLE_MOVEMENT
+; Ejecuta el movimiento de la nave basado en la bandera move_dir y el timer.
+;----------------------------------------------------
+HANDLE_MOVEMENT proc
+    push ax
+    push bx
+    push cx ; Guarda CX para usarlo en el timer
+
+    ; --- Control de Velocidad (Speed Timer) ---
+    inc [player_speed_timer]
+    mov al, [player_speed_timer]
+    cmp al, player_speed_delay
+    jl end_handle_movement_timer_check ; Si el contador no ha llegado al delay, salta (no se mueve)
+
+    ; Reiniciar el contador de velocidad y continuar el movimiento
+    mov [player_speed_timer], 0
+
+    ; No moverse si la bandera es 0 (Stop)
+    cmp [move_dir], 0
+    je end_handle_movement_logic
+
+    cmp [move_dir], 1 ; ¿Es movimiento hacia la Izquierda?
+    jne check_right
+    ; Lógica Mover Izquierda
+    mov bl,[player_col]
+    cmp bl,lim_izquierdo + 2
+    jle end_handle_movement_logic ; No moverse si está en el límite
+    call BORRA_JUGADOR
+    dec [player_col]
+    call IMPRIME_JUGADOR
+    jmp end_handle_movement_logic
+
+check_right:
+    ; move_dir == 2 (Movimiento hacia la Derecha)
+    ; Lógica Mover Derecha
+    mov bl,[player_col]
+    cmp bl,lim_derecho - 2
+    jge end_handle_movement_logic ; No moverse si está en el límite
+    call BORRA_JUGADOR
+    inc [player_col]
+    call IMPRIME_JUGADOR
+
+end_handle_movement_logic:
+    ; Restaura registros si se ejecutó el movimiento
+    pop cx 
+    pop bx
+    pop ax
+    ret
+
+end_handle_movement_timer_check:
+    ; Restaura registros si se saltó el movimiento por el timer
+    pop cx 
+    pop bx
+    pop ax
+    ret
+HANDLE_MOVEMENT endp
+
+;----------------------------------------------------
+; PROCEDIMIENTO: MANEJA_TECLADO_V2
+; Actualiza la bandera move_dir (1, 2, o 0) o dispara.
+;----------------------------------------------------
+MANEJA_TECLADO_V2 proc
+    push ax
+    push bx
+    
+    ; Guardar AL, ya que se modificará
+    push ax
+    ; Convertir a mayúscula para simplificar la comprobación
+    cmp al,'a'
+    jl check_d_key_v2 ; Si ya es mayúscula o no es alfabético, saltar
+    cmp al,'z'
+    jg check_d_key_v2
+    sub al, 20h ; Convierte a mayúscula ('a' -> 'A', 'd' -> 'D', 's' -> 'S')
+
+check_d_key_v2:
+    ; Comprobar 'D' (Derecha)
+    cmp al,Tecla_D
+    jne check_a_key_v2
+    ; Establece la bandera de movimiento (2=Derecha)
+    mov [move_dir], 2
+    jmp check_fire_key_v2 ; Salta a revisar el disparo sin salir del proc
+
+check_a_key_v2:
+    ; Comprobar 'A' (Izquierda)
+    cmp al,Tecla_A
+    jne check_s_key
+    ; Establece la bandera de movimiento (1=Izquierda)
+    mov [move_dir], 1
+    jmp check_fire_key_v2 ; Salta a revisar el disparo sin salir del proc
+
+check_s_key:
+    ; Comprobar 'S' (Stop) 
+    cmp al,Tecla_S
+    jne check_fire_key_v2
+    ; Establece la bandera de movimiento (0=Stop)
+    mov [move_dir], 0
+    ; Continúa al check_fire_key_v2 para permitir disparar mientras se detiene.
+
+check_fire_key_v2:
+    ; Restaurar AL original (código ASCII)
+    pop ax
+    ; Comprobar Spacebar (Disparo)
+    cmp al, Tecla_SPACE
+    jne end_maneja_teclado_v2
+
+    ; Lógica Disparo (siempre dispara, independientemente del movimiento)
+    call LANZA_PROYECTIL
+
+end_maneja_teclado_v2:
+    pop bx
+    pop ax
+    ret
+MANEJA_TECLADO_V2 endp
+
+;----------------------------------------------------
 ; NUEVO PROCEDIMIENTO: DELAY_LOOP
 ; Implementa un retardo forzado (busy-wait)
 ;----------------------------------------------------
 DELAY_LOOP proc
-    push cx
-    ; CX es el contador, el valor se toma de GAME_SPEED_DELAY
-    mov cx, GAME_SPEED_DELAY
+    push cx
+    ; CX es el contador, el valor se toma de GAME_SPEED_DELAY
+    mov cx, GAME_SPEED_DELAY
 delay_start:
-    loop delay_start
-    pop cx
-    ret
+    loop delay_start
+    pop cx
+    ret
 DELAY_LOOP endp
 
 ;----------------------------------------------------
@@ -598,68 +730,15 @@ pop ax
 ret
 BORRA_PROYECTIL endp
 
-
 ;----------------------------------------------------
-; PROCEDIMIENTO: MANEJA_TECLADO (Modificado para Disparo)
-; Mueve la nave del jugador si se presiona 'A' o 'D', o dispara con ' '
+; PROCEDIMIENTO: MANEJA_TECLADO (Original, NO USADO)
+; Se ha reemplazado por MANEJA_TECLADO_V2 y HANDLE_MOVEMENT para mejor manejo simultáneo.
 ;----------------------------------------------------
 MANEJA_TECLADO proc
-push ax
-push bx
-push cx
-; Guardar AL, ya que se modificará
-push ax
-; Convertir a mayúscula para simplificar la comprobación
-cmp al,'a'
-jl check_d_key ; Si ya es mayúscula o no es alfabético, saltar
-cmp al,'z'
-jg check_d_key
-sub al, 20h ; Convierte a mayúscula ('a' -> 'A', 'd' -> 'D')
-
-check_d_key:
-; Comprobar 'D' (Derecha)
-cmp al,Tecla_D
-jne check_a_key
-; Lógica Mover Derecha
-mov bl,[player_col]
-cmp bl,lim_derecho - 2
-jge check_fire_key ; No moverse si está en el límite
-
-call BORRA_JUGADOR
-inc [player_col]
-call IMPRIME_JUGADOR
-jmp check_fire_key
-
-check_a_key:
-; Comprobar 'A' (Izquierda)
-cmp al,Tecla_A
-jne check_fire_key
-; Lógica Mover Izquierda
-mov bl,[player_col]
-cmp bl,lim_izquierdo + 2
-jle check_fire_key ; No moverse si está en el límite
-
-call BORRA_JUGADOR
-dec [player_col]
-call IMPRIME_JUGADOR
-jmp check_fire_key
-
-check_fire_key:
-; Restaurar AL original (código ASCII)
-pop ax
-; Comprobar Spacebar (Disparo)
-cmp al, Tecla_SPACE
-jne end_maneja_teclado
-
-; Lógica Disparo
-call LANZA_PROYECTIL
-
-end_maneja_teclado:
-pop cx
-pop bx
-pop ax
-ret
+    ; Este procedimiento no se usa en esta versión corregida
+    ret
 MANEJA_TECLADO endp
+
 
 DIBUJA_UI proc
 ;imprimir esquina superior izquierda del marco
