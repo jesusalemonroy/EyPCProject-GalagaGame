@@ -148,6 +148,23 @@ bullet_char equ 94d ; Carácter '^' para el proyectil
 bullet_speed_timer db 0 ; Contador para la velocidad del proyectil
 bullet_speed_delay equ 3 ; Cuántos ciclos debe esperar antes de moverse (mayor = más lento)
 
+; =========================================================================
+; NUEVAS VARIABLES PARA EL PROYECTIL DEL ENEMIGO
+; =========================================================================
+enemy_bullet_ren db 0
+enemy_bullet_col db 0
+enemy_bullet_active db 0 ; 0 = inactivo, 1 = activo
+enemy_bullet_char equ 17d ; Carácter '▼' (Triángulo hacia abajo)
+
+enemy_fire_delay equ 150 ; Ciclos antes de intentar disparar
+enemy_fire_timer db 0
+enemy_bullet_speed_delay equ 4 ; El proyectil enemigo es ligeramente más rápido
+enemy_bullet_speed_timer db 0
+
+game_over_msg db "GAME OVER!" ; Mensaje para fin de juego
+
+; =========================================================================
+
 ; *** CONSTANTE PRINCIPAL DE VELOCIDAD DE JUEGO ***
 ; Controla el framerate total del juego. AUMENTAR este valor para ralentizar todo.
 GAME_SPEED_DELAY equ 25000d
@@ -351,15 +368,8 @@ call IMPRIME_ENEMIGO ; Dibuja el enemigo en la posición inicial
 
 game_loop:
 ; 1. Manejo del teclado (movimiento de la nave y disparo)
-mov ah, 01h ; Revisa si hay una tecla disponible (no bloqueante)
-int 16h
-jz handle_mouse ; Si Z flag = 1 (no hay tecla), salta a revisar el mouse
-
-; Hay una tecla disponible, la lee (bloqueante, pero ya sabemos que hay datos)
-mov ah, 00h
-int 16h ; AL = código ASCII, AH = scan code
-
-call MANEJA_TECLADO ; Llama al procedimiento para mover/disparar
+; *** Se llama al nuevo procedimiento para procesar todas las teclas pendientes ***
+call PROCESA_TECLAS_PENDIENTES
 
 handle_mouse:
 ; 2. Manejo del mouse (solo para botones de UI como [X])
@@ -404,6 +414,8 @@ update_logic:
 call MUEVE_PROYECTIL
 ; >>> Lógica: Manejo del Estado y Movimiento del Enemigo <<<
 call MANEJA_ENEMIGO
+; >>> Lógica: Manejo del Disparo y Proyectil del Enemigo <<<
+call MANEJA_DISPARO_ENEMIGO
 
 ; *** NUEVO: Retardo para limitar la velocidad del bucle principal ***
 call DELAY_LOOP
@@ -419,6 +431,37 @@ int 21h ;señal 21h de interrupción, pasa el control al sistema operativo
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;PROCEDIMIENTOS;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: PROCESA_TECLAS_PENDIENTES
+; Procesa todas las teclas pendientes en el buffer de BIOS (no bloqueante).
+; Esto permite el movimiento continuo y el disparo sin detener el juego.
+;----------------------------------------------------
+PROCESA_TECLAS_PENDIENTES proc
+    push ax
+    pushf ; Guardar flags
+tecla_loop_start:
+    ; 1. Revisar si hay una tecla disponible (AH=01h, no bloqueante)
+    int_teclado ; macro: mov ah,01h; int 16h
+    jz tecla_loop_end ; Si Z flag = 1 (no hay tecla), salir del loop
+
+    ; 2. Leer la tecla (AH=00h, lee y consume del buffer)
+    mov ah, 00h
+    int 16h ; AL = código ASCII, AH = scan code
+
+    ; 3. Procesar la tecla
+    ; La tecla (AL/AH) está lista para ser usada en MANEJA_TECLADO
+    call MANEJA_TECLADO
+
+    ; Volver a chequear el buffer inmediatamente
+    jmp tecla_loop_start
+
+tecla_loop_end:
+    popf ; Restaurar flags
+    pop ax
+    ret
+PROCESA_TECLAS_PENDIENTES endp
+
 
 ;----------------------------------------------------
 ; PROCEDIMIENTO: MANEJA_ENEMIGO (Actualizado para Respawn)
@@ -758,15 +801,321 @@ BORRA_PROYECTIL endp
 
 
 ;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: LANZA_PROYECTIL_ENEMIGO
+; Inicializa la posición del proyectil enemigo y lo activa
+;----------------------------------------------------
+LANZA_PROYECTIL_ENEMIGO proc
+    push ax
+    ; Si el enemigo está muerto o el proyectil ya está activo, ignorar
+    cmp [enemy_status], 1
+    jne check_bullet_active_enemy
+    jmp end_lanza_enemy_bullet
+
+check_bullet_active_enemy:
+    cmp [enemy_bullet_active], 1
+    je end_lanza_enemy_bullet
+
+    ; Activar proyectil
+    mov [enemy_bullet_active], 1
+
+    ; Poner el proyectil justo debajo del centro del enemigo
+    mov al, [enemy_col]
+    mov [enemy_bullet_col], al
+    ; El proyectil inicia en enemy_ren + 2
+    mov al, [enemy_ren]
+    add al, 2
+    mov [enemy_bullet_ren], al
+
+end_lanza_enemy_bullet:
+    pop ax
+    ret
+LANZA_PROYECTIL_ENEMIGO endp
+
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: MANEJA_DISPARO_ENEMIGO
+; Decide si el enemigo dispara y actualiza el proyectil enemigo.
+;----------------------------------------------------
+MANEJA_DISPARO_ENEMIGO proc
+    push ax
+    push cx
+    ; 1. Lógica de Disparo (Solo si el enemigo está activo)
+    cmp [enemy_status], 0
+    jne skip_enemy_fire_logic
+
+    inc [enemy_fire_timer]
+    mov al, [enemy_fire_timer]
+    cmp al, enemy_fire_delay
+    jl skip_enemy_fire_attempt ; No disparar aún
+
+    mov [enemy_fire_timer], 0 ; Reiniciar timer
+
+    ; Generar un número aleatorio simple usando el contador de loop (ticks)
+    ; Hay una probabilidad de 10/16 de disparar en este ciclo
+    mov ax, [ticks]
+    and al, 0Fh ; Solo los 4 bits más bajos (0 a 15)
+    cmp al, 0Ah ; 10 en decimal, si es menor, dispara
+    jl fire_enemy_bullet
+
+    jmp skip_enemy_fire_attempt
+
+fire_enemy_bullet:
+    call LANZA_PROYECTIL_ENEMIGO
+
+skip_enemy_fire_attempt: ; <<--- ETIAUETA CORREGIDA
+skip_enemy_fire_logic:
+    ; 2. Mover Proyectil Enemigo
+    call MUEVE_PROYECTIL_ENEMIGO
+
+    pop cx
+    pop ax
+    ret
+MANEJA_DISPARO_ENEMIGO endp
+
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: MUEVE_PROYECTIL_ENEMIGO
+; Mueve el proyectil enemigo hacia abajo y comprueba colisiones
+;----------------------------------------------------
+MUEVE_PROYECTIL_ENEMIGO proc
+    push ax
+    push bx
+    push cx
+    push dx
+
+    ; Si no está activo, salir
+    cmp [enemy_bullet_active], 0
+    je end_mueve_enemy_bullet
+
+    ; --- Control de Velocidad (Speed Timer) ---
+    inc [enemy_bullet_speed_timer]
+    mov al, [enemy_bullet_speed_timer]
+    cmp al, enemy_bullet_speed_delay
+    jl end_mueve_enemy_bullet ; No mover si el timer no ha llegado al delay
+
+    ; Reiniciar el contador de velocidad y continuar el movimiento
+    mov [enemy_bullet_speed_timer], 0
+
+    ; 1. Borrar el proyectil en su posición anterior
+    call BORRA_PROYECTIL_ENEMIGO
+
+    ; 2. Mover el proyectil (hacia abajo)
+    inc [enemy_bullet_ren]
+
+    ; 3. Comprobar colisiones con jugador o límite inferior
+    call COMPRUEBA_COLISION_ENEMIGO
+
+    ; Si el proyectil sigue activo después de la comprobación, lo dibuja en la nueva posición
+    cmp [enemy_bullet_active], 1
+    je draw_enemy_bullet
+    jmp end_mueve_enemy_bullet ; Si fue desactivado (colisión), no dibujarlo
+
+draw_enemy_bullet:
+    call IMPRIME_PROYECTIL_ENEMIGO
+
+end_mueve_enemy_bullet:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+MUEVE_PROYECTIL_ENEMIGO endp
+
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: COMPRUEBA_COLISION_ENEMIGO
+; Verifica si el proyectil enemigo toca al jugador o al borde inferior
+;----------------------------------------------------
+COMPRUEBA_COLISION_ENEMIGO proc
+    push ax
+    push bx
+    push cx
+    push dx
+
+    ; --- Chequeo de Borde Inferior ---
+    ; Si el proyectil se movió al renglón lim_inferior (23) o mayor
+    mov al, [enemy_bullet_ren]
+    cmp al, lim_inferior
+    jg hit_bottom_boundary ; Si renglón > 23, colisión con borde
+
+    ; --- Chequeo de Colisión con Jugador (Nave de 3x5) ---
+    ; Renglon del jugador: [player_ren - 2] (top) a [player_ren] (bottom)
+    ; Columna del jugador: [player_col - 2] (left) a [player_col + 2] (right)
+
+    ; 1. Chequeo de Renglón
+    mov al, [enemy_bullet_ren]
+    cmp al, [player_ren]
+    jg check_miss ; Si el proyectil está más abajo del renglón más bajo del jugador, falló.
+    mov bl, [player_ren]
+    sub bl, 2
+    cmp al, bl
+    jl check_miss ; Si el proyectil está más arriba del renglón más alto del jugador, falló.
+
+    ; 2. Chequeo de Columna (Solo si el renglón es correcto)
+    mov al, [enemy_bullet_col]
+    mov bl, [player_col]
+    sub bl, 2 ; Columna izquierda del jugador (player_col - 2)
+    cmp al, bl
+    jl check_miss ; Si columna es muy a la izquierda, falló.
+    mov bl, [player_col]
+    add bl, 2 ; Columna derecha del jugador (player_col + 2)
+    cmp al, bl
+    jle hit_player ; ¡Colisión!
+
+    jmp check_miss
+
+hit_bottom_boundary:
+    ; Si golpea el límite inferior, desactiva el proyectil
+    call RESETEA_PROYECTIL_ENEMIGO
+    jmp end_collision_check_enemy
+
+hit_player:
+    ; Si golpea al jugador, desactiva el proyectil
+    call RESETEA_PROYECTIL_ENEMIGO
+
+    ; *** Lógica de golpe al jugador ***
+    call PLAYER_HIT_HANDLER
+
+    jmp end_collision_check_enemy
+
+check_miss:
+    ; No colisionó
+    jmp end_collision_check_enemy
+
+end_collision_check_enemy:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+COMPRUEBA_COLISION_ENEMIGO endp
+
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: RESETEA_PROYECTIL_ENEMIGO
+; Desactiva el proyectil enemigo y lo borra de la pantalla
+;----------------------------------------------------
+RESETEA_PROYECTIL_ENEMIGO proc
+    push ax
+    push bx
+    push dx
+    ; 1. Borrar el proyectil de su posición actual
+    mov al, [enemy_bullet_ren]
+    cmp al, lim_superior
+    jl skip_borrado_enemy_bullet ; Si renglón es < 1, no borrar
+
+    mov al, [enemy_bullet_col]
+    mov [col_aux], al
+    mov al, [enemy_bullet_ren]
+    mov [ren_aux], al
+    call BORRA_PROYECTIL_ENEMIGO
+
+skip_borrado_enemy_bullet:
+    ; 2. Desactivar el proyectil
+    mov [enemy_bullet_active], 0
+    mov [enemy_bullet_speed_timer], 0
+    pop dx
+    pop bx
+    pop ax
+    ret
+RESETEA_PROYECTIL_ENEMIGO endp
+
+;----------------------------------------------------
+; NUEVOS PROCEDIMIENTOS: IMPRIME_PROYECTIL_ENEMIGO / BORRA_PROYECTIL_ENEMIGO
+;----------------------------------------------------
+IMPRIME_PROYECTIL_ENEMIGO proc
+    push ax
+    ; Caracter '▼' (17d) con color Rojo Claro
+    posiciona_cursor [enemy_bullet_ren],[enemy_bullet_col]
+    imprime_caracter_color enemy_bullet_char,cRojoClaro,bgNegro
+    pop ax
+    ret
+IMPRIME_PROYECTIL_ENEMIGO endp
+
+BORRA_PROYECTIL_ENEMIGO proc
+    push ax
+    ; Si está fuera de límites, no borrar (para proteger el marco)
+    mov al, [enemy_bullet_ren]
+    cmp al, lim_superior
+    jl end_borra_enemy
+
+    cmp al, lim_inferior
+    jg end_borra_enemy
+
+    ; Borrar con un espacio negro
+    posiciona_cursor [enemy_bullet_ren],[enemy_bullet_col]
+    imprime_caracter_color 32d,cNegro,bgNegro
+
+end_borra_enemy:
+    pop ax
+    ret
+BORRA_PROYECTIL_ENEMIGO endp
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: PLAYER_HIT_HANDLER
+; Lógica cuando el jugador es golpeado. Reduce vidas y maneja GAME OVER.
+;----------------------------------------------------
+PLAYER_HIT_HANDLER proc
+    push ax
+    push bx
+    push cx
+    push dx
+
+    ; 1. Reduce vidas
+    dec [player_lives]
+
+    ; 2. Manejo de fin de juego
+    mov al, [player_lives]
+    cmp al, 0
+    jle handle_game_over_final ; Si vidas <= 0
+
+    ; 3. Respawn del Jugador (Borrar y reimprimir la nave)
+    call BORRA_JUGADOR ; Borra la nave en la posición actual
+
+    ; Borrar y reimprimir la lista de vidas (☻)
+    posiciona_cursor lives_ren, lives_col+20
+    imprime_cadena_color blank, 6, cNegro, bgNegro ; Borrar todos los ☻
+    call IMPRIME_LIVES ; Reimprimir las vidas restantes
+
+    ; (Opcional: implementar un parpadeo o retardo de invulnerabilidad aquí)
+
+    call IMPRIME_JUGADOR ; Reimprimir la nave
+    jmp end_player_hit
+
+handle_game_over_final:
+    ; Muestra GAME OVER
+    posiciona_cursor 12, 10
+    imprime_cadena_color game_over_msg, 10, cRojoClaro, bgNegro ; 'GAME OVER!'
+    ; Pausa breve
+    mov cx, 5
+wait_loop:
+    call DELAY_LOOP
+    loop wait_loop
+
+    jmp salir ; Salir del programa
+
+end_player_hit:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+PLAYER_HIT_HANDLER endp
+;----------------------------------------------------
+
+
+;----------------------------------------------------
 ; PROCEDIMIENTO: MANEJA_TECLADO (Modificado para Disparo)
 ; Mueve la nave del jugador si se presiona 'A' o 'D', o dispara con ' '
+; NOTA: Este procedimiento asume que AL/AH contienen el código de la tecla
+; (obtenido de INT 16h / AH=00h) antes de ser llamado.
 ;----------------------------------------------------
 MANEJA_TECLADO proc
-push ax
 push bx
 push cx
-; Guardar AL, ya que se modificará
+; Guardar AL/AH (código de tecla)
 push ax
+
 ; Convertir a mayúscula para simplificar la comprobación
 cmp al,'a'
 jl check_d_key ; Si ya es mayúscula o no es alfabético, saltar
@@ -803,7 +1152,7 @@ call IMPRIME_JUGADOR
 jmp check_fire_key
 
 check_fire_key:
-; Restaurar AL original (código ASCII)
+; Restaurar AL original (código ASCII para el chequeo del espacio)
 pop ax
 ; Comprobar Spacebar (Disparo)
 cmp al, Tecla_SPACE
@@ -815,7 +1164,6 @@ call LANZA_PROYECTIL
 end_maneja_teclado:
 pop cx
 pop bx
-pop ax
 ret
 MANEJA_TECLADO endp
 
@@ -1030,8 +1378,9 @@ endp
 
 IMPRIME_DATOS_INICIALES proc
 call DATOS_INICIALES ;inicializa variables de juego
-;inicializa el estado del proyectil
+;inicializa el estado de los proyectiles
 mov [bullet_active], 0
+mov [enemy_bullet_active], 0
 ;imprime la 'nave' del jugador
 ;borra la posición actual, luego se reinicia la posición y entonces se vuelve a imprimir
 call BORRA_JUGADOR
