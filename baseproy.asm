@@ -148,6 +148,22 @@ bullet_char equ 94d ; Carácter '^' para el proyectil
 bullet_speed_timer db 0 ; Contador para la velocidad del proyectil
 bullet_speed_delay equ 3 ; Cuántos ciclos debe esperar antes de moverse (mayor = más lento)
 
+; ====================================================================
+; >>> NUEVAS VARIABLES: PROYECTIL DEL ENEMIGO <<<
+; ====================================================================
+enemy_bullet_ren db 0 ; Posición en renglón del proyectil del enemigo
+enemy_bullet_col db 0 ; Posición en columna del proyectil del enemigo
+enemy_bullet_active db 0 ; 0 = inactivo, 1 = activo
+enemy_bullet_char equ 86d ; Carácter para el proyectil enemigo (Triángulo invertido)
+
+; Control de velocidad y frecuencia de disparo del enemigo
+enemy_bullet_speed_delay equ 3 ; Velocidad del proyectil enemigo
+enemy_bullet_speed_timer db 0 ; Contador para la velocidad
+ENEMY_FIRE_RATE_DELAY equ 50 ; Cuántos ciclos debe esperar antes de disparar
+enemy_fire_timer db 0 ; Contador para la frecuencia de disparo
+
+; ====================================================================
+
 ; *** CONSTANTE PRINCIPAL DE VELOCIDAD DE JUEGO ***
 ; Controla el framerate total del juego. AUMENTAR este valor para ralentizar todo.
 GAME_SPEED_DELAY equ 25000d
@@ -400,8 +416,9 @@ test bx,0001h
 jnz mouse_wait_release
 
 update_logic:
-; 3. Lógica del juego (movimiento del proyectil y colisiones)
-call MUEVE_PROYECTIL
+; 3. Lógica del juego (movimiento de proyectiles y colisiones)
+call MUEVE_PROYECTIL      ; Proyectil del jugador
+call MUEVE_PROYECTIL_ENEMIGO ; <<< AÑADIDO: Proyectil del enemigo
 ; >>> Lógica: Manejo del Estado y Movimiento del Enemigo <<<
 call MANEJA_ENEMIGO
 
@@ -421,121 +438,351 @@ int 21h ;señal 21h de interrupción, pasa el control al sistema operativo
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;----------------------------------------------------
-; PROCEDIMIENTO: MANEJA_ENEMIGO (Actualizado para Respawn)
-; Maneja el estado (vivo/muerto) y el movimiento del enemigo
+; PROCEDIMIENTO: MANEJA_ENEMIGO (Actualizado para Respawn y Disparo)
+; Maneja el estado (vivo/muerto), el movimiento y el disparo del enemigo.
 ;----------------------------------------------------
 MANEJA_ENEMIGO proc
+    push ax
+    push bx
+    push cx
+
+    cmp [enemy_status], 0 ; ¿Está el enemigo vivo/activo?
+    je enemy_is_active ; Si sí, salta a moverlo
+
+    ; --- Lógica de Respawn (Si enemy_status == 1) ---
+    inc [enemy_respawn_timer] ; Incrementar contador de espera
+    mov al, [enemy_respawn_timer]
+    cmp al, enemy_respawn_delay ; ¿Se ha alcanzado el tiempo de espera?
+    jl end_maneja_enemigo ; Si no, seguir esperando
+
+    ; Si el tiempo de espera ha terminado: Reiniciar estado y posición
+    mov [enemy_status], 0 ; 0 = Activo
+    mov [enemy_respawn_timer], 0 ; Resetear timer
+
+    ; Restablecer posición y dirección inicial
+    mov al, ini_columna
+    mov [enemy_col], al
+    mov al, 3
+    mov [enemy_ren], al
+    mov [enemy_direction], 1 ; Dirección inicial a la derecha
+
+    ; Imprimir enemigo al reaparecer
+    call IMPRIME_ENEMIGO
+
+    jmp end_maneja_enemigo
+
+enemy_is_active:
+    ; --- Lógica de Movimiento (Si enemy_status == 0) ---
+    ; Control de Velocidad
+    inc [enemy_move_timer]
+    mov al, [enemy_move_timer]
+    cmp al, enemy_move_delay
+    jl check_fire ; No mover si el timer no ha llegado al delay
+
+    mov [enemy_move_timer], 0 ; Reiniciar timer
+
+    ; 1. Borrar Enemigo de posición actual
+    call BORRA_ENEMIGO
+
+    ; 2. Calcular nueva posición horizontal
+    mov al, [enemy_col]
+    mov bl, [enemy_direction]
+    add al, bl
+    mov [enemy_col], al
+
+    ; 3. Comprobar límites y cambiar dirección/bajar
+
+    ; Límite DERECHO: Si la columna central (enemy_col) es mayor o igual a (lim_derecho - 2)
+    mov al, [enemy_col]
+    cmp al, lim_derecho - 2
+    jg reached_right
+
+    ; Límite IZQUIERDO: Si la columna central (enemy_col) es menor o igual a (lim_izquierdo + 2)
+    mov al, [enemy_col]
+    cmp al, lim_izquierdo + 2
+    jl reached_left
+
+    jmp continue_draw
+
+reached_right:
+    ; 3a. Invertir dirección (de 1 a -1/255)
+    mov [enemy_direction], 255d ; -1 (Izquierda)
+    ; Forzar a la columna límite
+    mov al, lim_derecho - 2
+    mov [enemy_col], al
+
+    ; 3b. Mover hacia abajo
+    inc [enemy_ren]
+    jmp check_game_over
+
+reached_left:
+    ; 3a. Invertir dirección (de -1/255 a 1)
+    mov [enemy_direction], 1 ; 1 (Derecha)
+    ; Forzar a la columna límite
+    mov al, lim_izquierdo + 2
+    mov [enemy_col], al
+
+    ; 3b. Mover hacia abajo
+    inc [enemy_ren]
+    jmp check_game_over
+
+check_game_over:
+    ; Comprobar si el enemigo ha llegado al límite inferior
+    mov al, [enemy_ren]
+    cmp al, lim_inferior - 2 ; Límite inferior del área de juego
+    jge handle_game_over
+
+    jmp continue_draw
+
+handle_game_over:
+    ; Simplemente forzaremos a mantenerse en el límite
+    mov al, lim_inferior - 2
+    mov [enemy_ren], al
+
+continue_draw:
+    ; 4. Dibujar enemigo en la nueva posición
+    call IMPRIME_ENEMIGO
+
+check_fire: ; <<< NUEVA ETIQUETA: Llama a la lógica de disparo
+    ; 5. Lógica de Disparo del Enemigo
+    call MANEJA_DISPARO_ENEMIGO
+
+end_maneja_enemigo:
+    pop cx
+    pop bx
+    pop ax
+    ret
+MANEJA_ENEMIGO endp
+
+;----------------------------------------------------
+; PROCEDIMIENTO: MANEJA_DISPARO_ENEMIGO
+; Controla la frecuencia de disparo y lanza el proyectil del enemigo.
+;----------------------------------------------------
+MANEJA_DISPARO_ENEMIGO proc
+    push ax
+    push cx
+
+    ; Solo dispara si el enemigo está activo (enemy_status == 0)
+    cmp [enemy_status], 0
+    jne end_enemy_fire
+
+    ; Y si NO hay ya un proyectil enemigo activo
+    cmp [enemy_bullet_active], 1
+    je end_enemy_fire
+
+    ; Control de frecuencia de disparo
+    inc [enemy_fire_timer]
+    mov al, [enemy_fire_timer]
+    cmp al, ENEMY_FIRE_RATE_DELAY
+    jl end_enemy_fire ; Aún no es tiempo de disparar
+
+    ; Es tiempo de disparar:
+    mov [enemy_fire_timer], 0 ; Reiniciar timer
+
+    ; Llamar a la lógica de lanzamiento
+    call LANZA_PROYECTIL_ENEMIGO
+
+end_enemy_fire:
+    pop cx
+    pop ax
+    ret
+MANEJA_DISPARO_ENEMIGO endp
+
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: LANZA_PROYECTIL_ENEMIGO
+; Inicializa la posición del proyectil enemigo y lo activa.
+;----------------------------------------------------
+LANZA_PROYECTIL_ENEMIGO proc
+    push ax
+
+    ; Si el proyectil ya está activo, ignorar
+    cmp [enemy_bullet_active], 1
+    je end_lanza_enemy_proyectil
+
+    ; Activar proyectil
+    mov [enemy_bullet_active], 1
+
+    ; Poner el proyectil justo debajo del cañón del enemigo (enemy_ren + 3)
+    mov al, [enemy_col]
+    mov [enemy_bullet_col], al
+
+    mov al, [enemy_ren]
+    add al, 3
+    mov [enemy_bullet_ren], al
+
+end_lanza_enemy_proyectil:
+    pop ax
+    ret
+LANZA_PROYECTIL_ENEMIGO endp
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: RESETEA_PROYECTIL_ENEMIGO
+; Desactiva el proyectil enemigo y lo borra de la pantalla
+;----------------------------------------------------
+RESETEA_PROYECTIL_ENEMIGO proc
+    push ax
+    push bx
+    push dx
+    ; 1. Borrar el proyectil de su posición actual
+    mov al, [enemy_bullet_col]
+    mov [col_aux], al
+    mov al, [enemy_bullet_ren]
+    mov [ren_aux], al
+    call BORRA_PROYECTIL_ENEMIGO
+
+    ; 2. Desactivar el proyectil
+    mov [enemy_bullet_active], 0
+    mov [enemy_bullet_speed_timer], 0
+    pop dx
+    pop bx
+    pop ax
+    ret
+RESETEA_PROYECTIL_ENEMIGO endp
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: MUEVE_PROYECTIL_ENEMIGO
+; Mueve el proyectil enemigo hacia abajo y comprueba colisiones.
+;----------------------------------------------------
+MUEVE_PROYECTIL_ENEMIGO proc
     push ax
     push bx
     push cx
 
-    cmp [enemy_status], 0 ; ¿Está el enemigo vivo/activo?
-    je enemy_is_active ; Si sí, salta a moverlo
+    ; Si no está activo, salir
+    cmp [enemy_bullet_active], 0
+    je end_mueve_enemy_proyectil
 
-    ; --- Lógica de Respawn (Si enemy_status == 1) ---
-    inc [enemy_respawn_timer] ; Incrementar contador de espera
-    mov al, [enemy_respawn_timer]
-    cmp al, enemy_respawn_delay ; ¿Se ha alcanzado el tiempo de espera?
-    jl end_maneja_enemigo ; Si no, seguir esperando
+    ; --- Control de Velocidad ---
+    inc [enemy_bullet_speed_timer]
+    mov al, [enemy_bullet_speed_timer]
+    cmp al, enemy_bullet_speed_delay
+    jl end_mueve_enemy_proyectil ; No mover si el timer no ha llegado al delay
 
-    ; Si el tiempo de espera ha terminado: Reiniciar estado y posición
-    mov [enemy_status], 0 ; 0 = Activo
-    mov [enemy_respawn_timer], 0 ; Resetear timer
+    mov [enemy_bullet_speed_timer], 0 ; Reiniciar el contador
 
-    ; Restablecer posición y dirección inicial
-    mov al, ini_columna
-    mov [enemy_col], al
-    mov al, 3
-    mov [enemy_ren], al
-    mov [enemy_direction], 1 ; Dirección inicial a la derecha
+    ; 1. Borrar el proyectil en su posición anterior
+    call BORRA_PROYECTIL_ENEMIGO
 
-    ; Imprimir enemigo al reaparecer
-    call IMPRIME_ENEMIGO
+    ; 2. Mover el proyectil (hacia abajo)
+    inc [enemy_bullet_ren]
 
-    jmp end_maneja_enemigo
+    ; 3. Comprobar colisiones con el jugador o borde inferior
+    call COMPRUEBA_COLISION_ENEMIGO_JUGADOR
 
-enemy_is_active:
-    ; --- Lógica de Movimiento (Si enemy_status == 0) ---
-    ; Control de Velocidad
-    inc [enemy_move_timer]
-    mov al, [enemy_move_timer]
-    cmp al, enemy_move_delay
-    jl end_maneja_enemigo ; No mover si el timer no ha llegado al delay
+    ; Si el proyectil sigue activo después de la comprobación, lo dibuja en la nueva posición
+    cmp [enemy_bullet_active], 1
+    je draw_enemy_bullet
+    jmp end_mueve_enemy_proyectil
 
-    mov [enemy_move_timer], 0 ; Reiniciar timer
+draw_enemy_bullet:
+    call IMPRIME_PROYECTIL_ENEMIGO
 
-    ; 1. Borrar Enemigo de posición actual
-    call BORRA_ENEMIGO
-
-    ; 2. Calcular nueva posición horizontal
-    mov al, [enemy_col]
-    mov bl, [enemy_direction]
-    add al, bl
-    mov [enemy_col], al
-
-    ; 3. Comprobar límites y cambiar dirección/bajar
-
-    ; Límite DERECHO: Si la columna central (enemy_col) es mayor o igual a (lim_derecho - 2)
-    mov al, [enemy_col]
-    cmp al, lim_derecho - 2
-    jg reached_right
-
-    ; Límite IZQUIERDO: Si la columna central (enemy_col) es menor o igual a (lim_izquierdo + 2)
-    mov al, [enemy_col]
-    cmp al, lim_izquierdo + 2
-    jl reached_left
-
-    jmp continue_draw
-
-reached_right:
-    ; 3a. Invertir dirección (de 1 a -1/255)
-    mov [enemy_direction], 255d ; -1 (Izquierda)
-    ; Forzar a la columna límite
-    mov al, lim_derecho - 2
-    mov [enemy_col], al
-
-    ; 3b. Mover hacia abajo
-    inc [enemy_ren]
-    jmp check_game_over
-
-reached_left:
-    ; 3a. Invertir dirección (de -1/255 a 1)
-    mov [enemy_direction], 1 ; 1 (Derecha)
-    ; Forzar a la columna límite
-    mov al, lim_izquierdo + 2
-    mov [enemy_col], al
-
-    ; 3b. Mover hacia abajo
-    inc [enemy_ren]
-    jmp check_game_over
-
-check_game_over:
-    ; Comprobar si el enemigo ha llegado al límite inferior
-    mov al, [enemy_ren]
-    cmp al, lim_inferior - 2 ; Límite inferior del área de juego
-    jge handle_game_over
-
-    jmp continue_draw
-
-handle_game_over:
-    ; Simplemente forzaremos a mantenerse en el límite
-    mov al, lim_inferior - 2
-    mov [enemy_ren], al
-
-continue_draw:
-    ; 4. Dibujar enemigo en la nueva posición
-    call IMPRIME_ENEMIGO
-
-end_maneja_enemigo:
+end_mueve_enemy_proyectil:
     pop cx
     pop bx
     pop ax
     ret
-MANEJA_ENEMIGO endp
+MUEVE_PROYECTIL_ENEMIGO endp
 
 
 ;----------------------------------------------------
-; NUEVO PROCEDIMIENTO: DELAY_LOOP
+; NUEVO PROCEDIMIENTO: COMPRUEBA_COLISION_ENEMIGO_JUGADOR
+; Verifica si el proyectil enemigo toca el borde inferior o al jugador.
+;----------------------------------------------------
+COMPRUEBA_COLISION_ENEMIGO_JUGADOR proc
+    push ax
+    push bx
+    push cx
+    push dx
+
+    ; --- Chequeo de Borde Inferior ---
+    mov al, [enemy_bullet_ren]
+    cmp al, lim_inferior
+    jge hit_boundary_enemy ; Si renglón >= límite inferior, colisión con borde
+
+    ; --- Chequeo de Colisión con Jugador (Estructura de 3x3x3) ---
+
+    ; 1. Chequeo de Renglón
+    mov al, [enemy_bullet_ren]
+    cmp al, [player_ren] - 2 ; Límite superior de la nave del jugador
+    jl end_enemy_collision_check
+
+    cmp al, [player_ren] ; Límite inferior de la nave del jugador
+    jg end_enemy_collision_check
+
+    ; 2. Chequeo de Columna (Solo si el renglón es correcto)
+    mov al, [enemy_bullet_col]
+    mov bl, [player_col]
+    sub bl, 1 ; Límite izquierdo de la nave del jugador (asumiendo 3 de ancho)
+    cmp al, bl
+    jl end_enemy_collision_check
+
+    mov bl, [player_col]
+    add bl, 1 ; Límite derecho de la nave del jugador (asumiendo 3 de ancho)
+    cmp al, bl
+    jle hit_player ; ¡Colisión!
+
+    jmp end_enemy_collision_check
+
+hit_boundary_enemy:
+    ; Si golpea el límite inferior, desactiva el proyectil
+    call RESETEA_PROYECTIL_ENEMIGO
+    jmp end_enemy_collision_check
+
+hit_player:
+    ; Si golpea al jugador, desactiva el proyectil
+    call RESETEA_PROYECTIL_ENEMIGO
+
+    ; --- Lógica de Daño al Jugador ---
+    call BORRA_JUGADOR ; Borrar nave
+
+    dec [player_lives] ; Restar una vida
+    call IMPRIME_LIVES ; Actualizar vidas en la UI (borra y redibuja vidas)
+
+    ; Reiniciar posición del jugador después de ser golpeado
+    mov [player_col], ini_columna
+    mov [player_ren], ini_renglon
+    call IMPRIME_JUGADOR ; Dibujar nave en la posición inicial
+
+    ; Comprobar Game Over
+    cmp [player_lives], 0
+    jg end_enemy_collision_check ; Si hay vidas, seguir
+    ; JUEGO TERMINADO:
+    jmp salir ; Salir del programa
+
+end_enemy_collision_check:
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+COMPRUEBA_COLISION_ENEMIGO_JUGADOR endp
+
+;----------------------------------------------------
+; NUEVO PROCEDIMIENTO: IMPRIME_PROYECTIL_ENEMIGO / BORRA_PROYECTIL_ENEMIGO
+;----------------------------------------------------
+IMPRIME_PROYECTIL_ENEMIGO proc
+    push ax
+    ; Caracter de proyectil enemigo (Rojo)
+    posiciona_cursor [enemy_bullet_ren],[enemy_bullet_col]
+    imprime_caracter_color enemy_bullet_char,cRojo,bgNegro
+    pop ax
+    ret
+IMPRIME_PROYECTIL_ENEMIGO endp
+
+BORRA_PROYECTIL_ENEMIGO proc
+    push ax
+    ; Borrar con un espacio negro
+    posiciona_cursor [enemy_bullet_ren],[enemy_bullet_col]
+    imprime_caracter_color 32d,cNegro,bgNegro
+    pop ax
+    ret
+BORRA_PROYECTIL_ENEMIGO endp
+
+
+;----------------------------------------------------
+; PROCEDIMIENTO: DELAY_LOOP
 ; Implementa un retardo forzado (busy-wait)
 ;----------------------------------------------------
 DELAY_LOOP proc
@@ -1011,6 +1258,8 @@ IMPRIME_DATOS_INICIALES proc
 call DATOS_INICIALES ;inicializa variables de juego
 ;inicializa el estado del proyectil
 mov [bullet_active], 0
+mov [enemy_bullet_active], 0 ; <<< AÑADIDO: Resetear proyectil enemigo
+
 ;imprime la 'nave' del jugador
 ;borra la posición actual, luego se reinicia la posición y entonces se vuelve a imprimir
 call BORRA_JUGADOR
@@ -1026,6 +1275,7 @@ mov [enemy_ren], 3
 mov [enemy_direction], 1 ; Reiniciar dirección a Derecha
 mov [enemy_status], 0 ; Asegurar que empieza visible
 mov [enemy_respawn_timer], 0
+mov [enemy_fire_timer], 0 ; <<< AÑADIDO: Resetear timer de disparo
 
 ;Imprime enemigo
 call IMPRIME_ENEMIGO
@@ -1042,6 +1292,11 @@ endp
 
 ;Imprime los caracteres ☻ que representan vidas. Inicialmente se imprime el número de 'player_lives'
 IMPRIME_LIVES proc
+; Borrar el área de vidas anterior (5 espacios)
+posiciona_cursor lives_ren,lives_col+20
+imprime_cadena_color blank,5,cNegro,bgNegro
+
+; Dibujar las vidas restantes
 xor cx,cx
 mov di,lives_col+20
 mov cl,[player_lives]
