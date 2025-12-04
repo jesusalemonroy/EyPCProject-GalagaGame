@@ -127,10 +127,15 @@ enemy_col_max db 0 ; Límite de columna derecha del enemigo
 enemy_ren_min db 0 ; Límite de renglón superior del enemigo
 enemy_ren_max db 0 ; Límite de renglón inferior del enemigo
 
-; Variables de movimiento del enemigo (NUEVAS)
+; Variables de movimiento del enemigo
 enemy_direction db 1 ; 1 = derecha, 255 (-1) = izquierda. Indica la dirección horizontal.
-enemy_move_delay equ 15 ; Cuántos ciclos debe esperar antes de moverse (mayor = más lento).
+enemy_move_delay equ 15; Cuántos ciclos debe esperar antes de moverse (mayor = más lento).
 enemy_move_timer db 0 ; Contador de tiempo para el movimiento del enemigo.
+
+; Variables de Estado y Respawn del Enemigo
+enemy_status db 0 ; 0 = Vivo/Activo, 1 = Muerto/Desaparecido (esperando respawn)
+enemy_respawn_delay equ 100 ; Duración del tiempo de espera (en ciclos de juego). AUMENTADO DE 50 A 100.
+enemy_respawn_timer db 0 ; Contador para el respawn
 
 ; Variables del proyectil del jugador
 bullet_ren db 0 ; Posición en renglón del proyectil
@@ -397,8 +402,8 @@ jnz mouse_wait_release
 update_logic:
 ; 3. Lógica del juego (movimiento del proyectil y colisiones)
 call MUEVE_PROYECTIL
-; >>> Lógica NUEVA: Movimiento del Enemigo <<<
-call MUEVE_ENEMIGO
+; >>> Lógica: Manejo del Estado y Movimiento del Enemigo <<<
+call MANEJA_ENEMIGO
 
 ; *** NUEVO: Retardo para limitar la velocidad del bucle principal ***
 call DELAY_LOOP
@@ -416,19 +421,46 @@ int 21h ;señal 21h de interrupción, pasa el control al sistema operativo
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;----------------------------------------------------
-; NUEVO PROCEDIMIENTO: MUEVE_ENEMIGO
-; Mueve el enemigo de forma horizontal y desciende al chocar con los bordes
+; PROCEDIMIENTO: MANEJA_ENEMIGO (Actualizado para Respawn)
+; Maneja el estado (vivo/muerto) y el movimiento del enemigo
 ;----------------------------------------------------
-MUEVE_ENEMIGO proc
+MANEJA_ENEMIGO proc
     push ax
     push bx
     push cx
 
-    ; --- Control de Velocidad ---
+    cmp [enemy_status], 0 ; ¿Está el enemigo vivo/activo?
+    je enemy_is_active ; Si sí, salta a moverlo
+
+    ; --- Lógica de Respawn (Si enemy_status == 1) ---
+    inc [enemy_respawn_timer] ; Incrementar contador de espera
+    mov al, [enemy_respawn_timer]
+    cmp al, enemy_respawn_delay ; ¿Se ha alcanzado el tiempo de espera?
+    jl end_maneja_enemigo ; Si no, seguir esperando
+
+    ; Si el tiempo de espera ha terminado: Reiniciar estado y posición
+    mov [enemy_status], 0 ; 0 = Activo
+    mov [enemy_respawn_timer], 0 ; Resetear timer
+
+    ; Restablecer posición y dirección inicial
+    mov al, ini_columna
+    mov [enemy_col], al
+    mov al, 3
+    mov [enemy_ren], al
+    mov [enemy_direction], 1 ; Dirección inicial a la derecha
+
+    ; Imprimir enemigo al reaparecer
+    call IMPRIME_ENEMIGO
+
+    jmp end_maneja_enemigo
+
+enemy_is_active:
+    ; --- Lógica de Movimiento (Si enemy_status == 0) ---
+    ; Control de Velocidad
     inc [enemy_move_timer]
     mov al, [enemy_move_timer]
     cmp al, enemy_move_delay
-    jl end_mueve_enemigo ; No mover si el timer no ha llegado al delay
+    jl end_maneja_enemigo ; No mover si el timer no ha llegado al delay
 
     mov [enemy_move_timer], 0 ; Reiniciar timer
 
@@ -437,13 +469,12 @@ MUEVE_ENEMIGO proc
 
     ; 2. Calcular nueva posición horizontal
     mov al, [enemy_col]
-    mov bl, [enemy_direction] ; 1 (derecha) o 255 (-1) (izquierda)
+    mov bl, [enemy_direction]
     add al, bl
     mov [enemy_col], al
 
     ; 3. Comprobar límites y cambiar dirección/bajar
 
-    ; El enemigo tiene 5 columnas de ancho (de C-2 a C+2)
     ; Límite DERECHO: Si la columna central (enemy_col) es mayor o igual a (lim_derecho - 2)
     mov al, [enemy_col]
     cmp al, lim_derecho - 2
@@ -454,18 +485,18 @@ MUEVE_ENEMIGO proc
     cmp al, lim_izquierdo + 2
     jl reached_left
 
-    jmp end_check
+    jmp continue_draw
 
 reached_right:
     ; 3a. Invertir dirección (de 1 a -1/255)
     mov [enemy_direction], 255d ; -1 (Izquierda)
-    ; Forzar a la columna límite para evitar que se salga
+    ; Forzar a la columna límite
     mov al, lim_derecho - 2
     mov [enemy_col], al
 
     ; 3b. Mover hacia abajo
     inc [enemy_ren]
-    jmp check_game_over ; Saltar al chequeo de fin de juego
+    jmp check_game_over
 
 reached_left:
     ; 3a. Invertir dirección (de -1/255 a 1)
@@ -476,35 +507,31 @@ reached_left:
 
     ; 3b. Mover hacia abajo
     inc [enemy_ren]
-    jmp check_game_over ; Saltar al chequeo de fin de juego
+    jmp check_game_over
 
 check_game_over:
     ; Comprobar si el enemigo ha llegado al límite inferior
     mov al, [enemy_ren]
     cmp al, lim_inferior - 2 ; Límite inferior del área de juego
-    jge handle_game_over ; Si es mayor o igual, se acabó el juego (o se pierde una vida)
+    jge handle_game_over
 
-    jmp end_check
+    jmp continue_draw
 
 handle_game_over:
-    ; Lógica de fin de juego o pérdida de vida
-    ; Por ahora, simplemente lo detendremos aquí.
-    ; Se podría reiniciar la posición del enemigo y restar una vida.
-    ; Lo forzaremos a mantenerse en el límite para que no continúe bajando
+    ; Simplemente forzaremos a mantenerse en el límite
     mov al, lim_inferior - 2
     mov [enemy_ren], al
 
-
-end_check:
+continue_draw:
     ; 4. Dibujar enemigo en la nueva posición
     call IMPRIME_ENEMIGO
 
-end_mueve_enemigo:
+end_maneja_enemigo:
     pop cx
     pop bx
     pop ax
     ret
-MUEVE_ENEMIGO endp
+MANEJA_ENEMIGO endp
 
 
 ;----------------------------------------------------
@@ -620,7 +647,7 @@ ret
 MUEVE_PROYECTIL endp
 
 ;----------------------------------------------------
-; PROCEDIMIENTO: COMPRUEBA_COLISION
+; PROCEDIMIENTO: COMPRUEBA_COLISION (ACTUALIZADO para Respawn)
 ; Verifica si el proyectil toca el borde superior o al enemigo
 ;----------------------------------------------------
 COMPRUEBA_COLISION proc
@@ -628,6 +655,10 @@ push ax
 push bx
 push cx
 push dx
+
+; Si el enemigo no está activo, no hay colisión posible
+cmp [enemy_status], 1
+je end_collision_check
 
 ; --- Chequeo de Borde Superior ---
 mov al, [bullet_ren]
@@ -638,22 +669,22 @@ jle hit_boundary ; Si renglón <= límite superior, colisión con borde
 
 ; 1. Chequeo de Renglón
 mov al, [bullet_ren]
-cmp al, [enemy_ren] ; ¿Es mayor o igual que el renglón superior del enemigo? (enemy_ren es el renglón superior de la parte central)
+cmp al, [enemy_ren]
 jl end_collision_check
 mov bl, [enemy_ren]
-add bl, 2 ; Renglón inferior del enemigo (enemy_ren + 2)
-cmp al, bl ; ¿Es menor o igual que el renglón inferior del enemigo?
+add bl, 2
+cmp al, bl
 jg end_collision_check
 
 ; 2. Chequeo de Columna (Solo si el renglón es correcto)
 mov al, [bullet_col]
 mov bl, [enemy_col]
-sub bl, 2 ; Columna izquierda del enemigo (enemy_col - 2)
-cmp al, bl ; ¿Es mayor o igual que la columna izquierda?
+sub bl, 2
+cmp al, bl
 jl end_collision_check
 mov bl, [enemy_col]
-add bl, 2 ; Columna derecha del enemigo (enemy_col + 2)
-cmp al, bl ; ¿Es menor o igual que la columna derecha?
+add bl, 2
+cmp al, bl
 jle hit_enemy ; ¡Colisión!
 
 jmp end_collision_check
@@ -666,8 +697,12 @@ jmp end_collision_check
 hit_enemy:
 ; Si golpea al enemigo, desactiva el proyectil
 call RESETEA_PROYECTIL
-; Borra al enemigo de la pantalla y actualiza el marcador
-call BORRA_ENEMIGO
+
+; --- Desactivar Enemigo y Borrar ---
+call BORRA_ENEMIGO ; Borrar el gráfico del enemigo inmediatamente
+mov [enemy_status], 1 ; Poner el enemigo en estado "muerto/espera"
+mov [enemy_respawn_timer], 0 ; Reiniciar contador de respawn
+
 inc word ptr [player_score] ; Sumar 1 punto
 call IMPRIME_SCORE ; Actualizar score
 
@@ -686,7 +721,7 @@ IMPRIME_PROYECTIL proc
 push ax
 ; Caracter '^' (94d) con color Rojo Claro
 posiciona_cursor [bullet_ren],[bullet_col]
-imprime_caracter_color bullet_char,cRojoClaro,bgNegro
+imprime_caracter_color bullet_char,cBlanco,bgNegro
 pop ax
 ret
 IMPRIME_PROYECTIL endp
@@ -723,7 +758,6 @@ check_d_key:
 cmp al,Tecla_D
 jne check_a_key
 ; Lógica Mover Derecha
-; El jugador tiene 5 columnas de ancho (de C-2 a C+2). Límite DERECHO es lim_derecho - 2.
 mov bl,[player_col]
 cmp bl,lim_derecho - 2
 jge check_fire_key ; No moverse si está en el límite
@@ -738,7 +772,6 @@ check_a_key:
 cmp al,Tecla_A
 jne check_fire_key
 ; Lógica Mover Izquierda
-; El jugador tiene 5 columnas de ancho (de C-2 a C+2). Límite IZQUIERDO es lim_izquierdo + 2.
 mov bl,[player_col]
 cmp bl,lim_izquierdo + 2
 jle check_fire_key ; No moverse si está en el límite
@@ -991,6 +1024,8 @@ call BORRA_ENEMIGO
 mov [enemy_col], ini_columna
 mov [enemy_ren], 3
 mov [enemy_direction], 1 ; Reiniciar dirección a Derecha
+mov [enemy_status], 0 ; Asegurar que empieza visible
+mov [enemy_respawn_timer], 0
 
 ;Imprime enemigo
 call IMPRIME_ENEMIGO
@@ -1284,11 +1319,17 @@ ret
 endp
 
 IMPRIME_ENEMIGO proc
+; Solo dibujar si el enemigo está activo (status 0)
+cmp [enemy_status], 0
+jne end_imprime_enemigo
+
 mov al,[enemy_col]
 mov ah,[enemy_ren]
 mov [col_aux],al
 mov [ren_aux],ah
 call PRINT_ENEMY
+
+end_imprime_enemigo:
 ret
 endp
 
