@@ -102,7 +102,6 @@ play_inf equ play_ren+1
 
 Tecla_A equ 41h ;'A' para izquierda
 Tecla_D equ 44h ;'D' para derecha
-Tecla_S equ 53h ;'S' para detener nave (Stop) 
 Tecla_SPACE equ 20h ;' ' para disparar (ASCII de Spacebar)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -128,15 +127,25 @@ enemy_col_max db 0 ; Límite de columna derecha del enemigo
 enemy_ren_min db 0 ; Límite de renglón superior del enemigo
 enemy_ren_max db 0 ; Límite de renglón inferior del enemigo
 
-; Proyectiles del Jugador (Multiples) - ARREGLOS
-MAX_BULLETS equ 3 ; Número máximo de proyectiles simultáneos
+; Variables de movimiento del enemigo
+enemy_direction db 1 ; 1 = derecha, 255 (-1) = izquierda. Indica la dirección horizontal.
+enemy_move_delay equ 15; Cuántos ciclos debe esperar antes de moverse (mayor = más lento).
+enemy_move_timer db 0 ; Contador de tiempo para el movimiento del enemigo.
+
+; Variables de Estado y Respawn del Enemigo
+enemy_status db 0 ; 0 = Vivo/Activo, 1 = Muerto/Desaparecido (esperando respawn)
+enemy_respawn_delay equ 100 ; Duración del tiempo de espera (en ciclos de juego). AUMENTADO DE 50 A 100.
+enemy_respawn_timer db 0 ; Contador para el respawn
+
+; Variables del proyectil del jugador
+bullet_ren db 0 ; Posición en renglón del proyectil
+bullet_col db 0 ; Posición en columna del proyectil
+bullet_active db 0 ; 0 = inactivo, 1 = activo
 bullet_char equ 94d ; Carácter '^' para el proyectil
 
-; Arrays de datos del proyectil (tamaño MAX_BULLETS)
-bullet_ren_array db MAX_BULLETS dup(0) ; Posición en renglón del proyectil
-bullet_col_array db MAX_BULLETS dup(0) ; Posición en columna del proyectil
-bullet_active_array db MAX_BULLETS dup(0) ; Estado: 0=inactivo, 1=activo
-bullet_speed_timers db MAX_BULLETS dup(0) ; Timer individual (por si se necesita velocidad variable)
+; Variables de control de velocidad del proyectil (AUMENTAR bullet_speed_delay para hacerlo más LENTO)
+; NOTA: La velocidad principal se controla con GAME_SPEED_DELAY
+bullet_speed_timer db 0 ; Contador para la velocidad del proyectil
 bullet_speed_delay equ 3 ; Cuántos ciclos debe esperar antes de moverse (mayor = más lento)
 
 ; *** CONSTANTE PRINCIPAL DE VELOCIDAD DE JUEGO ***
@@ -147,13 +156,6 @@ col_aux db 0 ;variable auxiliar para operaciones con posicion - columna
 ren_aux db 0 ;variable auxiliar para operaciones con posicion - renglon
 
 conta db 0 ;contador
-
-; *** VARIABLE DE ESTADO DE MOVIMIENTO ***
-move_dir db 0 ; 0=ninguno/Stop, 1=izquierda (A), 2=derecha (D). No se reinicia en el game_loop.
-
-; Variables de control de velocidad de la nave (mayor = más lento)
-player_speed_timer db 0 ; Contador para la velocidad de la nave
-player_speed_delay equ 3 ; La nave se moverá cada 3 ciclos del juego (VALOR AJUSTABLE)
 
 ;; Variables de ayuda para lectura de tiempo del sistema
 tick_ms dw 55 ;55 ms por cada tick del sistema, esta variable se usa para operación de MUL convertir ticks a segundos
@@ -237,11 +239,31 @@ xor bl,bl ;BL = 0, parámetro para int 10h opción 1003h
 endm
 
 ;imprime_caracter_color - Imprime un caracter de cierto color en pantalla, especificado por 'caracter', 'color' y 'bg_color'.
-; Los colores disponibles están en la lista a continuacion;
+;Los colores disponibles están en la lista a continuacion;
+; Colores:
+; 0h: Negro
+; 1h: Azul
+; 2h: Verde
+; 3h: Cyan
+; 4h: Rojo
+; 5h: Magenta
+; 6h: Cafe
+; 7h: Gris Claro
+; 8h: Gris Oscuro
+; 9h: Azul Claro
+; Ah: Verde Claro
+; Bh: Cyan Claro
+; Ch: Rojo Claro
+; Dh: Magenta Claro
+; Eh: Amarillo
+; Fh: Blanco
 ; utiliza int 10h opcion 09h
 ; 'caracter' - caracter que se va a imprimir
 ; 'color' - color que tomará el caracter
 ; 'bg_color' - color de fondo para el carácter en la celda
+; Cuando se define el color del carácter, éste se hace en el registro BL:
+; La parte baja de BL (los 4 bits menos significativos) define el color del carácter
+; La parte alta de BL (los 4 bits más significativos) define el color de fondo "background" del carácter
 imprime_caracter_color macro caracter,color,bg_color
 mov ah,09h ;preparar AH para interrupcion, opcion 09h
 mov al,caracter ;AL = caracter a imprimir
@@ -276,6 +298,11 @@ endm
 ;lee_mouse - Revisa el estado del mouse
 ;Devuelve:
 ;;BX - estado de los botones
+;;;Si BX = 0000h, ningun boton presionado
+;;;Si BX = 0001h, boton izquierdo presionado
+;;;Si BX = 0002h, boton derecho presionado
+;;;Si BX = 0003h, boton izquierdo y derecho presionados
+; (400,120) => 80x25 =>Columna: 400 x 80 / 640 = 50; Renglon: (120 x 25 / 200) = 15 => 50,15
 ;;CX - columna en la que se encuentra el mouse en resolucion 640x200 (columnas x renglones)
 ;;DX - renglon en el que se encuentra el mouse en resolucion 640x200 (columnas x renglones)
 lee_mouse macro
@@ -320,27 +347,19 @@ apaga_cursor_parpadeo ;Deshabilita parpadeo del cursor
 call DIBUJA_UI ;procedimiento que dibuja marco de la interfaz
 muestra_cursor_mouse ;hace visible el cursor del mouse
 call IMPRIME_JUGADOR ; Dibuja la nave en la posición inicial
+call IMPRIME_ENEMIGO ; Dibuja el enemigo en la posición inicial
 
 game_loop:
-    ; move_dir NO se resetea aquí, lo que permite el movimiento persistente
-    ; hasta que se presiona 'S'.
+; 1. Manejo del teclado (movimiento de la nave y disparo)
+mov ah, 01h ; Revisa si hay una tecla disponible (no bloqueante)
+int 16h
+jz handle_mouse ; Si Z flag = 1 (no hay tecla), salta a revisar el mouse
 
-; 1. Manejo del teclado (Lee todas las teclas y establece la bandera de dirección/disparo)
-keyboard_poll_loop:
-    mov ah, 01h ; Revisa si hay una tecla disponible (no bloqueante)
-    int 16h
-    jz end_keyboard_poll ; Si Z flag = 1 (buffer vacío), salta a terminar la revisión
+; Hay una tecla disponible, la lee (bloqueante, pero ya sabemos que hay datos)
+mov ah, 00h
+int 16h ; AL = código ASCII, AH = scan code
 
-    ; Si Z flag = 0 (hay tecla), la lee (bloqueante, pero ya sabemos que hay datos)
-    mov ah, 00h
-    int 16h ; AL = código ASCII, AH = scan code
-
-    call MANEJA_TECLADO_V2 ; Establece la bandera move_dir (1, 2, o 0/Stop) o dispara
-    jmp keyboard_poll_loop ; Vuelve a revisar si hay más teclas en el buffer (procesa todas)
-
-end_keyboard_poll:
-    
-    call HANDLE_MOVEMENT ; Ejecuta el movimiento si la bandera move_dir está establecida Y el timer lo permite
+call MANEJA_TECLADO ; Llama al procedimiento para mover/disparar
 
 handle_mouse:
 ; 2. Manejo del mouse (solo para botones de UI como [X])
@@ -382,7 +401,9 @@ jnz mouse_wait_release
 
 update_logic:
 ; 3. Lógica del juego (movimiento del proyectil y colisiones)
-call MUEVE_PROYECTIL ; AHORA MANEJA MÚLTIPLES PROYECTILES
+call MUEVE_PROYECTIL
+; >>> Lógica: Manejo del Estado y Movimiento del Enemigo <<<
+call MANEJA_ENEMIGO
 
 ; *** NUEVO: Retardo para limitar la velocidad del bucle principal ***
 call DELAY_LOOP
@@ -400,119 +421,118 @@ int 21h ;señal 21h de interrupción, pasa el control al sistema operativo
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;----------------------------------------------------
-; PROCEDIMIENTO: HANDLE_MOVEMENT
-; Ejecuta el movimiento de la nave basado en la bandera move_dir y el timer.
+; PROCEDIMIENTO: MANEJA_ENEMIGO (Actualizado para Respawn)
+; Maneja el estado (vivo/muerto) y el movimiento del enemigo
 ;----------------------------------------------------
-HANDLE_MOVEMENT proc
+MANEJA_ENEMIGO proc
     push ax
     push bx
-    push cx ; Guarda CX para usarlo en el timer
+    push cx
 
-    ; --- Control de Velocidad (Speed Timer) ---
-    inc [player_speed_timer]
-    mov al, [player_speed_timer]
-    cmp al, player_speed_delay
-    jl end_handle_movement_timer_check ; Si el contador no ha llegado al delay, salta (no se mueve)
+    cmp [enemy_status], 0 ; ¿Está el enemigo vivo/activo?
+    je enemy_is_active ; Si sí, salta a moverlo
 
-    ; Reiniciar el contador de velocidad y continuar el movimiento
-    mov [player_speed_timer], 0
+    ; --- Lógica de Respawn (Si enemy_status == 1) ---
+    inc [enemy_respawn_timer] ; Incrementar contador de espera
+    mov al, [enemy_respawn_timer]
+    cmp al, enemy_respawn_delay ; ¿Se ha alcanzado el tiempo de espera?
+    jl end_maneja_enemigo ; Si no, seguir esperando
 
-    ; No moverse si la bandera es 0 (Stop)
-    cmp [move_dir], 0
-    je end_handle_movement_logic
+    ; Si el tiempo de espera ha terminado: Reiniciar estado y posición
+    mov [enemy_status], 0 ; 0 = Activo
+    mov [enemy_respawn_timer], 0 ; Resetear timer
 
-    cmp [move_dir], 1 ; ¿Es movimiento hacia la Izquierda?
-    jne check_right
-    ; Lógica Mover Izquierda
-    mov bl,[player_col]
-    cmp bl,lim_izquierdo + 2
-    jle end_handle_movement_logic ; No moverse si está en el límite
-    call BORRA_JUGADOR
-    dec [player_col]
-    call IMPRIME_JUGADOR
-    jmp end_handle_movement_logic
+    ; Restablecer posición y dirección inicial
+    mov al, ini_columna
+    mov [enemy_col], al
+    mov al, 3
+    mov [enemy_ren], al
+    mov [enemy_direction], 1 ; Dirección inicial a la derecha
 
-check_right:
-    ; move_dir == 2 (Movimiento hacia la Derecha)
-    ; Lógica Mover Derecha
-    mov bl,[player_col]
-    cmp bl,lim_derecho - 2
-    jge end_handle_movement_logic ; No moverse si está en el límite
-    call BORRA_JUGADOR
-    inc [player_col]
-    call IMPRIME_JUGADOR
+    ; Imprimir enemigo al reaparecer
+    call IMPRIME_ENEMIGO
 
-end_handle_movement_logic:
-    ; Restaura registros si se ejecutó el movimiento
+    jmp end_maneja_enemigo
+
+enemy_is_active:
+    ; --- Lógica de Movimiento (Si enemy_status == 0) ---
+    ; Control de Velocidad
+    inc [enemy_move_timer]
+    mov al, [enemy_move_timer]
+    cmp al, enemy_move_delay
+    jl end_maneja_enemigo ; No mover si el timer no ha llegado al delay
+
+    mov [enemy_move_timer], 0 ; Reiniciar timer
+
+    ; 1. Borrar Enemigo de posición actual
+    call BORRA_ENEMIGO
+
+    ; 2. Calcular nueva posición horizontal
+    mov al, [enemy_col]
+    mov bl, [enemy_direction]
+    add al, bl
+    mov [enemy_col], al
+
+    ; 3. Comprobar límites y cambiar dirección/bajar
+
+    ; Límite DERECHO: Si la columna central (enemy_col) es mayor o igual a (lim_derecho - 2)
+    mov al, [enemy_col]
+    cmp al, lim_derecho - 2
+    jg reached_right
+
+    ; Límite IZQUIERDO: Si la columna central (enemy_col) es menor o igual a (lim_izquierdo + 2)
+    mov al, [enemy_col]
+    cmp al, lim_izquierdo + 2
+    jl reached_left
+
+    jmp continue_draw
+
+reached_right:
+    ; 3a. Invertir dirección (de 1 a -1/255)
+    mov [enemy_direction], 255d ; -1 (Izquierda)
+    ; Forzar a la columna límite
+    mov al, lim_derecho - 2
+    mov [enemy_col], al
+
+    ; 3b. Mover hacia abajo
+    inc [enemy_ren]
+    jmp check_game_over
+
+reached_left:
+    ; 3a. Invertir dirección (de -1/255 a 1)
+    mov [enemy_direction], 1 ; 1 (Derecha)
+    ; Forzar a la columna límite
+    mov al, lim_izquierdo + 2
+    mov [enemy_col], al
+
+    ; 3b. Mover hacia abajo
+    inc [enemy_ren]
+    jmp check_game_over
+
+check_game_over:
+    ; Comprobar si el enemigo ha llegado al límite inferior
+    mov al, [enemy_ren]
+    cmp al, lim_inferior - 2 ; Límite inferior del área de juego
+    jge handle_game_over
+
+    jmp continue_draw
+
+handle_game_over:
+    ; Simplemente forzaremos a mantenerse en el límite
+    mov al, lim_inferior - 2
+    mov [enemy_ren], al
+
+continue_draw:
+    ; 4. Dibujar enemigo en la nueva posición
+    call IMPRIME_ENEMIGO
+
+end_maneja_enemigo:
     pop cx
     pop bx
     pop ax
     ret
+MANEJA_ENEMIGO endp
 
-end_handle_movement_timer_check:
-    ; Restaura registros si se saltó el movimiento por el timer
-    pop cx
-    pop bx
-    pop ax
-    ret
-HANDLE_MOVEMENT endp
-
-;----------------------------------------------------
-; PROCEDIMIENTO: MANEJA_TECLADO_V2
-; Actualiza la bandera move_dir (1, 2, o 0) o dispara.
-;----------------------------------------------------
-MANEJA_TECLADO_V2 proc
-    push ax
-    push bx
-    
-    ; Guardar AL, ya que se modificará
-    push ax
-    ; Convertir a mayúscula para simplificar la comprobación
-    cmp al,'a'
-    jl check_d_key_v2 ; Si ya es mayúscula o no es alfabético, saltar
-    cmp al,'z'
-    jg check_d_key_v2
-    sub al, 20h ; Convierte a mayúscula ('a' -> 'A', 'd' -> 'D', 's' -> 'S')
-
-check_d_key_v2:
-    ; Comprobar 'D' (Derecha)
-    cmp al,Tecla_D
-    jne check_a_key_v2
-    ; Establece la bandera de movimiento (2=Derecha)
-    mov [move_dir], 2
-    jmp check_fire_key_v2 ; Salta a revisar el disparo sin salir del proc
-
-check_a_key_v2:
-    ; Comprobar 'A' (Izquierda)
-    cmp al,Tecla_A
-    jne check_s_key
-    ; Establece la bandera de movimiento (1=Izquierda)
-    mov [move_dir], 1
-    jmp check_fire_key_v2 ; Salta a revisar el disparo sin salir del proc
-
-check_s_key:
-    ; Comprobar 'S' (Stop) 
-    cmp al,Tecla_S
-    jne check_fire_key_v2
-    ; Establece la bandera de movimiento (0=Stop)
-    mov [move_dir], 0
-    ; Continúa al check_fire_key_v2 para permitir disparar mientras se detiene.
-
-check_fire_key_v2:
-    ; Restaurar AL original (código ASCII)
-    pop ax
-    ; Comprobar Spacebar (Disparo)
-    cmp al, Tecla_SPACE
-    jne end_maneja_teclado_v2
-
-    ; Lógica Disparo (siempre dispara, independientemente del movimiento)
-    call LANZA_PROYECTIL ; Usa el nuevo procedimiento que maneja el array
-
-end_maneja_teclado_v2:
-    pop bx
-    pop ax
-    ret
-MANEJA_TECLADO_V2 endp
 
 ;----------------------------------------------------
 ; NUEVO PROCEDIMIENTO: DELAY_LOOP
@@ -528,134 +548,105 @@ delay_start:
     ret
 DELAY_LOOP endp
 
-;====================================================
-; PROCEDIMIENTOS DE PROYECTIL (Nuevos para Multi-Disparo)
-;====================================================
-
 ;----------------------------------------------------
 ; PROCEDIMIENTO: LANZA_PROYECTIL
-; Busca un slot inactivo, inicializa la posición del proyectil y lo activa.
+; Inicializa la posición del proyectil y lo activa
 ;----------------------------------------------------
 LANZA_PROYECTIL proc
 push ax
-push cx
-push si
-   
-mov cx, MAX_BULLETS ; CX = número de proyectiles a revisar (para el loop)
-mov si, 0 ; SI = índice del proyectil (offset 0)
+; Si el proyectil ya está activo, ignorar el nuevo disparo
+cmp [bullet_active], 1
+je end_lanza_proyectil
 
-find_empty_slot:
-    ; Revisa el estado de la bala actual
-    mov al, [bullet_active_array + si]
-    cmp al, 0 ; ¿Está inactiva (0)?
-    je activate_bullet_slot ; Si es 0, usar este slot
-   
-    inc si ; Si está activa, pasa al siguiente slot
-    loop find_empty_slot ; Repite el ciclo
+; Activar proyectil
+mov [bullet_active], 1
 
-jmp end_lanza_proyectil_cleanup ; Si el loop termina, todos están activos.
+; Poner el proyectil justo encima del cañón del jugador
+mov al, [player_col]
+mov [bullet_col], al
+; La nave tiene 3 renglones de altura. El proyectil inicia en player_ren - 3.
+mov al, [player_ren]
+sub al, 3
+mov [bullet_ren], al
 
-activate_bullet_slot:
-    ; 1. Activar proyectil en el slot SI
-    mov byte ptr [bullet_active_array + si], 1
-
-    ; 2. Poner el proyectil justo encima del cañón del jugador
-    ; Columna: player_col
-    mov al, [player_col]
-    mov [bullet_col_array + si], al
-    ; Renglón: player_ren - 3 (Para estar encima de la nave 3x3)
-    mov al, [player_ren]
-    sub al, 3
-    mov [bullet_ren_array + si], al
-    ; Resetear timer de velocidad (aunque no es estrictamente necesario, es buena práctica)
-    mov byte ptr [bullet_speed_timers + si], 0
-
-end_lanza_proyectil_cleanup:
-pop si
-pop cx
+end_lanza_proyectil:
 pop ax
 ret
 LANZA_PROYECTIL endp
 
 ;----------------------------------------------------
-; PROCEDIMIENTO: RESETEA_PROYECTIL_SLOT
-; Desactiva el proyectil (slot SI) y lo borra de la pantalla.
-; SI debe contener el índice del proyectil.
+; PROCEDIMIENTO: RESETEA_PROYECTIL (CORREGIDO)
+; Desactiva el proyectil y lo borra de la pantalla
 ;----------------------------------------------------
-RESETEA_PROYECTIL_SLOT proc
+RESETEA_PROYECTIL proc
 push ax
-push si ; Guarda SI del llamador
-   
+push bx
+push dx
+
 ; 1. Borrar el proyectil de su posición actual
-call BORRA_PROYECTIL_SLOT ; Utiliza SI
+; Solo borrar si el renglón es mayor o igual a 1 (área de juego)
+mov al, [bullet_ren]
+cmp al, lim_superior
+jl skip_borrado_proyectil ; Si renglón < 1 (es 0 o menos), no intentar borrar
 
+mov al, [bullet_col]
+mov [col_aux], al
+mov al, [bullet_ren]
+mov [ren_aux], al
+call BORRA_PROYECTIL
+
+skip_borrado_proyectil:
 ; 2. Desactivar el proyectil
-mov byte ptr [bullet_active_array + si], 0
-; Reiniciar el temporizador
-mov byte ptr [bullet_speed_timers + si], 0
-
-pop si
+mov [bullet_active], 0
+; Asegurar que el temporizador de velocidad también se reinicie
+mov [bullet_speed_timer], 0
+pop dx
+pop bx
 pop ax
 ret
-RESETEA_PROYECTIL_SLOT endp
+RESETEA_PROYECTIL endp
 
 ;----------------------------------------------------
 ; PROCEDIMIENTO: MUEVE_PROYECTIL
-; Itera sobre todos los proyectiles, los mueve si están activos
-; y maneja el control de velocidad individual.
+; Mueve el proyectil y comprueba las condiciones de finalización
 ;----------------------------------------------------
 MUEVE_PROYECTIL proc
 push ax
 push bx
 push cx
-push si
 
-mov cx, MAX_BULLETS ; CX = contador de bucle
-mov si, 0 ; SI = índice de proyectil (0 a MAX_BULLETS-1)
+; Si no está activo, salir
+cmp [bullet_active], 0
+je end_mueve_proyectil
 
-move_bullet_loop:
-    push cx ; Guardar el contador para usar LOOP
+; --- Control de Velocidad (Speed Timer) ---
+; Este timer ahora actúa como un multiplicador para el retardo general del juego
+inc [bullet_speed_timer]
+mov al, [bullet_speed_timer]
+cmp al, bullet_speed_delay
+jl end_mueve_proyectil ; Si el contador no ha llegado al delay, salta (no se mueve)
 
-    ; 1. Si no está activo, saltar al siguiente
-    mov al, [bullet_active_array + si]
-    cmp al, 0
-    je next_bullet_slot_in_loop
-   
-    ; 2. Control de Velocidad (Timer individual por bala)
-    inc byte ptr [bullet_speed_timers + si]
-    mov al, [bullet_speed_timers + si]
-    cmp al, bullet_speed_delay
-    jl next_bullet_slot_in_loop ; Si el contador no ha llegado al delay, salta (no se mueve)
+; Reiniciar el contador de velocidad y continuar el movimiento
+mov [bullet_speed_timer], 0
 
-    ; Reiniciar el contador de velocidad
-    mov byte ptr [bullet_speed_timers + si], 0
+; 1. Borrar el proyectil en su posición anterior
+call BORRA_PROYECTIL
 
-    ; --- Mover la bala SI ---
-    ; 3. Borrar el proyectil en su posición anterior
-    call BORRA_PROYECTIL_SLOT ; Utiliza SI para indexar
-   
-    ; 4. Mover el proyectil (decrementa renglón)
-    dec byte ptr [bullet_ren_array + si]
+; 2. Mover el proyectil
+dec [bullet_ren]
 
-    ; 5. Comprobar colisiones
-    call COMPRUEBA_COLISION_SLOT ; Utiliza SI para indexar
-   
-    ; 6. Si el proyectil sigue activo después de la comprobación, lo dibuja en la nueva posición
-    mov al, [bullet_active_array + si]
-    cmp al, 1
-    je draw_bullet_slot_in_loop
-    jmp next_bullet_slot_in_loop ; Si se desactivó (colisionó), no dibujar
+; 3. Comprobar colisiones
+call COMPRUEBA_COLISION
 
-draw_bullet_slot_in_loop:
-    call IMPRIME_PROYECTIL_SLOT ; Utiliza SI para indexar
+; Si el proyectil sigue activo después de la comprobación, lo dibuja en la nueva posición
+cmp [bullet_active], 1
+je draw_bullet
+jmp end_mueve_proyectil ; Si fue desactivado (colisión), no dibujarlo
 
-next_bullet_slot_in_loop:
-    inc si ; Mueve al siguiente índice
-    pop cx ; Restaurar CX para el loop
-    loop move_bullet_loop
+draw_bullet:
+call IMPRIME_PROYECTIL
 
-end_mueve_proyectil_cleanup:
-pop si
+end_mueve_proyectil:
 pop cx
 pop bx
 pop ax
@@ -663,111 +654,170 @@ ret
 MUEVE_PROYECTIL endp
 
 ;----------------------------------------------------
-; PROCEDIMIENTO: COMPRUEBA_COLISION_SLOT
-; Verifica si el proyectil (slot SI) toca el borde superior o al enemigo
-; SI debe contener el índice del proyectil.
+; PROCEDIMIENTO: COMPRUEBA_COLISION (ACTUALIZADO para Respawn)
+; Verifica si el proyectil toca el borde superior o al enemigo
 ;----------------------------------------------------
-COMPRUEBA_COLISION_SLOT proc
+COMPRUEBA_COLISION proc
 push ax
 push bx
 push cx
-push si ; Guarda SI para preservar el índice
+push dx
 
-; Obtener posición del proyectil (Renglón en AL, Columna en BL)
-mov al, [bullet_ren_array + si]
-mov bl, [bullet_col_array + si]
+; Si el enemigo no está activo, no hay colisión posible
+cmp [enemy_status], 1
+je check_boundary_only ; Si enemigo está muerto, solo revisar el límite superior
 
-; --- Chequeo de Borde Superior ---
-cmp al, lim_superior
-jle hit_boundary_slot ; Si renglón <= límite superior, colisión con borde
-   
 ; --- Chequeo de Colisión con Enemigo (Estructura de 3x5) ---
-; 1. Chequeo de Renglón (bullet_ren vs enemy_ren y enemy_ren + 2)
-mov cl, [enemy_ren] ; Renglón superior del enemigo
-cmp al, cl
-jl end_collision_check_slot ; Bala está demasiado alta
-add cl, 2 ; Renglón inferior del enemigo
-cmp al, cl
-jg end_collision_check_slot ; Bala está demasiado baja
 
-; 2. Chequeo de Columna (bullet_col vs enemy_col - 2 y enemy_col + 2)
-mov cl, [enemy_col]
-sub cl, 2 ; Columna izquierda del enemigo
-cmp bl, cl
-jl end_collision_check_slot ; Bala está demasiado a la izquierda
-mov cl, [enemy_col]
-add cl, 2 ; Columna derecha del enemigo
-cmp bl, cl
-jle hit_enemy_slot ; ¡Colisión!
+; 1. Chequeo de Renglón
+mov al, [bullet_ren]
+cmp al, [enemy_ren]
+jl check_boundary_only ; Si renglón es muy alto, ir a chequear borde
+mov bl, [enemy_ren]
+add bl, 2
+cmp al, bl
+jg check_boundary_only ; Si renglón es muy bajo, ir a chequear borde
 
-jmp end_collision_check_slot
+; 2. Chequeo de Columna (Solo si el renglón es correcto)
+mov al, [bullet_col]
+mov bl, [enemy_col]
+sub bl, 2
+cmp al, bl
+jl check_boundary_only
+mov bl, [enemy_col]
+add bl, 2
+cmp al, bl
+jle hit_enemy ; ¡Colisión!
 
-hit_boundary_slot:
-    ; Si golpea el límite superior, desactiva el proyectil
-    call RESETEA_PROYECTIL_SLOT ; Utiliza SI
-    jmp end_collision_check_slot
+check_boundary_only:
+; --- Chequeo de Borde Superior ---
+; Si el proyectil se movió al renglón lim_superior (1) o menor (0)
+mov al, [bullet_ren]
+cmp al, lim_superior
+jle hit_boundary ; Si renglón <= límite superior, colisión con borde
 
-hit_enemy_slot:
-    ; Si golpea al enemigo, desactiva el proyectil
-    call RESETEA_PROYECTIL_SLOT ; Utiliza SI
-    ; Borra al enemigo de la pantalla
-    call BORRA_ENEMIGO
-    ; TODO: Lógica de Score y respawn del enemigo iría aquí.
+jmp end_collision_check
 
-end_collision_check_slot:
-pop si
+hit_boundary:
+; Si golpea el límite superior, desactiva el proyectil
+call RESETEA_PROYECTIL
+jmp end_collision_check
+
+hit_enemy:
+; Si golpea al enemigo, desactiva el proyectil
+call RESETEA_PROYECTIL
+
+; --- Desactivar Enemigo y Borrar ---
+call BORRA_ENEMIGO ; Borrar el gráfico del enemigo inmediatamente
+mov [enemy_status], 1 ; Poner el enemigo en estado "muerto/espera"
+mov [enemy_respawn_timer], 0 ; Reiniciar contador de respawn
+
+inc word ptr [player_score] ; Sumar 1 punto
+call IMPRIME_SCORE ; Actualizar score
+
+end_collision_check:
+pop dx
 pop cx
 pop bx
 pop ax
 ret
-COMPRUEBA_COLISION_SLOT endp
-
+COMPRUEBA_COLISION endp
 
 ;----------------------------------------------------
-; PROCEDIMIENTOS: IMPRIME_PROYECTIL_SLOT / BORRA_PROYECTIL_SLOT
-; Utilizan el índice en SI para acceder al arreglo de posiciones
+; PROCEDIMIENTOS: IMPRIME_PROYECTIL / BORRA_PROYECTIL
 ;----------------------------------------------------
-IMPRIME_PROYECTIL_SLOT proc
+IMPRIME_PROYECTIL proc
 push ax
-push dx
-; Obtener la posición (dx:dh = ren, dx:dl = col)
-mov dl, [bullet_col_array + si]
-mov dh, [bullet_ren_array + si]
-
-posiciona_cursor dh,dl ; dh = renglon, dl = columna
-; Caracter '^' (94d) con color Blanco
+; Caracter '^' (94d) con color Rojo Claro
+posiciona_cursor [bullet_ren],[bullet_col]
 imprime_caracter_color bullet_char,cBlanco,bgNegro
-
-pop dx
 pop ax
 ret
-IMPRIME_PROYECTIL_SLOT endp
+IMPRIME_PROYECTIL endp
 
-BORRA_PROYECTIL_SLOT proc
+BORRA_PROYECTIL proc
 push ax
-push dx
-; Obtener la posición (dx:dh = ren, dx:dl = col)
-mov dl, [bullet_col_array + si]
-mov dh, [bullet_ren_array + si]
+; --- MODIFICACIÓN CLAVE PARA PROTEGER EL MARCO ---
+; Si el renglón es 0 o 24 (donde está el marco), no borramos.
+; El proyectil solo debe borrarse si está dentro del área de juego [1, 23].
+mov al, [bullet_ren]
+cmp al, lim_superior
+jl end_borra ; Si renglón < 1 (es 0 o menos), no borrar
 
-posiciona_cursor dh,dl ; dh = renglon, dl = columna
-; Borrar con un espacio negro
+cmp al, lim_inferior
+jg end_borra ; Si renglón > 23 (es 24 o más), no borrar
+
+; Si está en el área [1, 23], borrar con un espacio negro
+posiciona_cursor [bullet_ren],[bullet_col]
 imprime_caracter_color 32d,cNegro,bgNegro
 
-pop dx
+end_borra:
 pop ax
 ret
-BORRA_PROYECTIL_SLOT endp
+BORRA_PROYECTIL endp
+
 
 ;----------------------------------------------------
-; PROCEDIMIENTO: MANEJA_TECLADO (Original, NO USADO)
-; Se ha reemplazado por MANEJA_TECLADO_V2 y HANDLE_MOVEMENT para mejor manejo simultáneo.
+; PROCEDIMIENTO: MANEJA_TECLADO (Modificado para Disparo)
+; Mueve la nave del jugador si se presiona 'A' o 'D', o dispara con ' '
 ;----------------------------------------------------
 MANEJA_TECLADO proc
-    ; Este procedimiento no se usa en esta versión corregida
-    ret
-MANEJA_TECLADO endp
+push ax
+push bx
+push cx
+; Guardar AL, ya que se modificará
+push ax
+; Convertir a mayúscula para simplificar la comprobación
+cmp al,'a'
+jl check_d_key ; Si ya es mayúscula o no es alfabético, saltar
+cmp al,'z'
+jg check_d_key
+sub al, 20h ; Convierte a mayúscula ('a' -> 'A', 'd' -> 'D')
 
+check_d_key:
+; Comprobar 'D' (Derecha)
+cmp al,Tecla_D
+jne check_a_key
+; Lógica Mover Derecha
+mov bl,[player_col]
+cmp bl,lim_derecho - 2
+jge check_fire_key ; No moverse si está en el límite
+
+call BORRA_JUGADOR
+inc [player_col]
+call IMPRIME_JUGADOR
+jmp check_fire_key
+
+check_a_key:
+; Comprobar 'A' (Izquierda)
+cmp al,Tecla_A
+jne check_fire_key
+; Lógica Mover Izquierda
+mov bl,[player_col]
+cmp bl,lim_izquierdo + 2
+jle check_fire_key ; No moverse si está en el límite
+
+call BORRA_JUGADOR
+dec [player_col]
+call IMPRIME_JUGADOR
+jmp check_fire_key
+
+check_fire_key:
+; Restaurar AL original (código ASCII)
+pop ax
+; Comprobar Spacebar (Disparo)
+cmp al, Tecla_SPACE
+jne end_maneja_teclado
+
+; Lógica Disparo
+call LANZA_PROYECTIL
+
+end_maneja_teclado:
+pop cx
+pop bx
+pop ax
+ret
+MANEJA_TECLADO endp
 
 DIBUJA_UI proc
 ;imprimir esquina superior izquierda del marco
@@ -980,15 +1030,8 @@ endp
 
 IMPRIME_DATOS_INICIALES proc
 call DATOS_INICIALES ;inicializa variables de juego
-;Inicializa el estado de los proyectiles
-mov si, 0
-mov cx, MAX_BULLETS
-reset_bullets:
-    mov byte ptr [bullet_active_array + si], 0
-    mov byte ptr [bullet_speed_timers + si], 0
-    inc si
-loop reset_bullets
-   
+;inicializa el estado del proyectil
+mov [bullet_active], 0
 ;imprime la 'nave' del jugador
 ;borra la posición actual, luego se reinicia la posición y entonces se vuelve a imprimir
 call BORRA_JUGADOR
@@ -998,6 +1041,12 @@ mov [player_ren], ini_renglon
 call IMPRIME_JUGADOR
 
 ;Borrar posicion actual del enemigo y reiniciar su posicion
+call BORRA_ENEMIGO
+mov [enemy_col], ini_columna
+mov [enemy_ren], 3
+mov [enemy_direction], 1 ; Reiniciar dirección a Derecha
+mov [enemy_status], 0 ; Asegurar que empieza visible
+mov [enemy_respawn_timer], 0
 
 ;Imprime enemigo
 call IMPRIME_ENEMIGO
@@ -1144,6 +1193,8 @@ push bx
 push cx
 push dx
 
+; Las coordenadas ren_aux y col_aux contienen enemy_ren y enemy_col (el centro)
+
 posiciona_cursor [ren_aux],[col_aux]
 imprime_caracter_color 178,cRojo,bgNegro
 inc [ren_aux]
@@ -1289,11 +1340,17 @@ ret
 endp
 
 IMPRIME_ENEMIGO proc
+; Solo dibujar si el enemigo está activo (status 0)
+cmp [enemy_status], 0
+jne end_imprime_enemigo
+
 mov al,[enemy_col]
 mov ah,[enemy_ren]
 mov [col_aux],al
 mov [ren_aux],ah
 call PRINT_ENEMY
+
+end_imprime_enemigo:
 ret
 endp
 
@@ -1309,4 +1366,4 @@ endp
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;FIN PROCEDIMIENTOS;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-end inicio ;fin de etiqueta inicio, fin de programa
+end inicio ;fin de etiqueta inicio
