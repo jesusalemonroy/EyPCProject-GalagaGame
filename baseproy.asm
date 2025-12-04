@@ -156,7 +156,7 @@ enemy_bullet_col db 0
 enemy_bullet_active db 0 ; 0 = inactivo, 1 = activo
 enemy_bullet_char equ 17d ; Carácter '▼' (Triángulo hacia abajo)
 
-enemy_fire_delay equ 150 ; Ciclos antes de intentar disparar
+enemy_fire_delay equ 100 ; Ciclos antes de intentar disparar
 enemy_fire_timer db 0
 enemy_bullet_speed_delay equ 4 ; El proyectil enemigo es ligeramente más rápido
 enemy_bullet_speed_timer db 0
@@ -801,8 +801,10 @@ BORRA_PROYECTIL endp
 
 
 ;----------------------------------------------------
-; NUEVO PROCEDIMIENTO: LANZA_PROYECTIL_ENEMIGO
-; Inicializa la posición del proyectil enemigo y lo activa
+; PROCEDIMIENTO CORREGIDO: LANZA_PROYECTIL_ENEMIGO
+; El ajuste de 'add al, 3' corrige la posición inicial
+; La parte inferior de la nave está en enemy_ren + 2, 
+; por lo que el proyectil inicia en enemy_ren + 3.
 ;----------------------------------------------------
 LANZA_PROYECTIL_ENEMIGO proc
     push ax
@@ -821,9 +823,11 @@ check_bullet_active_enemy:
     ; Poner el proyectil justo debajo del centro del enemigo
     mov al, [enemy_col]
     mov [enemy_bullet_col], al
-    ; El proyectil inicia en enemy_ren + 2
+    
+    ; *** CORRECCIÓN CLAVE: El proyectil inicia en enemy_ren + 3 ***
+    ; Esto lo coloca 1 cuadrado debajo del punto más bajo de la nave (enemy_ren + 2).
     mov al, [enemy_ren]
-    add al, 2
+    add al, 3
     mov [enemy_bullet_ren], al
 
 end_lanza_enemy_bullet:
@@ -862,7 +866,7 @@ MANEJA_DISPARO_ENEMIGO proc
 fire_enemy_bullet:
     call LANZA_PROYECTIL_ENEMIGO
 
-skip_enemy_fire_attempt: ; <<--- ETIAUETA CORREGIDA
+skip_enemy_fire_attempt:
 skip_enemy_fire_logic:
     ; 2. Mover Proyectil Enemigo
     call MUEVE_PROYECTIL_ENEMIGO
